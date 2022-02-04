@@ -1,0 +1,253 @@
+---
+title: "Fig2"
+author: "James Drew"
+date: "19/02/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+## The Moffitt et al. 2021 dataset 
+
+Expression data is taken from the series matrix file. Data has been preprocessed as per: 	log2 Cy5 signal was analyzed after setting negative values to zero. Probe data were collapsed by gene symbol via mean expression. Samples were quantile normalized to the subset of genes with less than 0.5 standard deviation across primary, metastatic, and normal samples.
+
+```{r}
+# load dependencies
+options(connectionObserver = NULL) # this is added to fix a bug with loading  ‘org.Hs.eg.db’ pkg in Rstudio
+library(org.Hs.eg.db)
+library(GSEABase)
+library(GSVA)
+library(ggplot2)
+library(tidyr)
+library(limma)
+library(gplots)
+library(dplyr)
+library(RColorBrewer)
+library(DESeq2)
+library(ggpubr)
+```
+
+## Data cleanup
+```{r}
+# read in data
+setwd <- getwd()
+c1_Hallmark_Sets <- getGmt('h.all.v7.2.entrez.gmt')
+load('HALLMARK_INTERFERON_genelist.RData')
+load('KEGG_MYC_TARGETS_genelist.RData')
+moffit.expr <- read.delim2('GSE71729_series_matrix.txt', skip=26)
+
+# keep primary tumor, liver, lung and LN met samples
+sample_filter <- grepl(pattern = 'Primary.Pancreas|Met.Liver|Met.LymphNode|Met.Lung',colnames(moffit.expr))
+sample_filter[1] <- TRUE
+moffit.expr <- moffit.expr[,sample_filter]
+
+# split metadata and expr
+moffit.meta <- moffit.expr[1:42,]
+moffit.expr <- moffit.expr[43:nrow(moffit.expr),]
+colnames(moffit.expr) <- moffit.expr[1,]
+moffit.expr <- moffit.expr[-c(1),]
+rownames(moffit.expr) <- moffit.expr$ID_REF
+moffit.expr <- moffit.expr[,-c(1)]
+
+# convert to numeric
+moffit.expr <- apply(moffit.expr,c(1,2),as.numeric)
+
+# replace na with 0
+print(paste(sum(is.na(moffit.expr))," genes removed because NA"))
+moffit.expr[is.na(moffit.expr)] <- 0
+
+# update symbol names
+entrez.list <- alias2SymbolTable(rownames(moffit.expr), species="Hs") # find updated symbol names
+print(paste(sum(is.na(entrez.list))," genes with no symbol map and ",sum(duplicated(entrez.list))," duplicated symbols"))
+# clean matrix
+moffit.expr <- moffit.expr[!is.na(entrez.list)&!duplicated(entrez.list),]
+entrez.list <- entrez.list[!is.na(entrez.list)&!duplicated(entrez.list)]
+gene.list <- AnnotationDbi::select(org.Hs.eg.db, keys = entrez.list, column = c("SYMBOL","ENTREZID"), keytype = "SYMBOL")
+gene.list <- gene.list[!duplicated(gene.list$SYMBOL),]
+
+# update row names
+rownames(moffit.expr) <- gene.list$SYMBOL
+```
+FIG2B: HEATMAP OF MYC-INF GENES
+```{r}
+## order samples by tissue site
+liver.samples <- grepl(pattern = "Liver",colnames(moffit.meta)[2:ncol(moffit.meta)])
+lung.samples <- grepl(pattern = "Lung",colnames(moffit.meta)[2:ncol(moffit.meta)])
+lymph.samples <- grepl(pattern = "Lymph",colnames(moffit.meta)[2:ncol(moffit.meta)])
+pancreas.samples <- grepl(pattern = "Pancreas",colnames(moffit.meta)[2:ncol(moffit.meta)])
+moffit.expr.ordered <- moffit.expr[,c(which(liver.samples),which(lung.samples),which(lymph.samples),which(pancreas.samples))]
+# compute full geneset arrays
+moffitt.myc2.expr <- moffit.expr.ordered[rownames(moffit.expr.ordered) %in% myc_targets_v2,]
+moffitt.ifna.expr <- moffit.expr.ordered[rownames(moffit.expr.ordered) %in% hallmark_ifn_alpha,]
+moffitt.ifng.expr <- moffit.expr.ordered[rownames(moffit.expr.ordered) %in% hallmark_ifn_gamma,]
+moffitt.gsea.expr <- rbind(moffitt.myc2.expr,moffitt.ifna.expr, moffitt.ifng.expr)
+# PLOT FIG2B
+pdf(file="fig2b.pdf")
+heatmap.2(moffitt.gsea.expr,
+        Rowv=NA,
+        Colv = T,
+        margins = c(5,20),
+        key=FALSE,
+        cexRow = 1,
+        cexCol = 0.8,
+        col=colorRampPalette(c("purple", "white", "green"))(299),
+        breaks= c(seq(-5,-0.3,length=100),seq(-0.29,0.29,length=100),seq(0.3,5,length=100)),
+        scale="row",
+        dendrogram = "col",
+        density.info="none",
+        trace="none",
+        RowSideColors = c(rep('green',nrow(moffitt.myc2.expr)),rep('red',nrow(moffitt.ifna.expr)),rep('blue',nrow(moffitt.ifng.expr))),
+        ColSideColors = c(rep('green',sum(liver.samples)), rep('purple',sum(lung.samples)),rep("yellow",sum(lymph.samples)),rep("grey",sum(pancreas.samples))))
+dev.off()
+
+## order samples by moffit classification
+no.samples <-grepl(pattern = ": 0",moffit.meta[19,2:ncol(moffit.meta)])
+classical.samples <- grepl(pattern = ": 1",moffit.meta[19,2:ncol(moffit.meta)])
+basal.samples <- grepl(pattern = ": 2",moffit.meta[19,2:ncol(moffit.meta)])
+moffit.expr.ordered <- moffit.expr[,c(which(no.samples),which(classical.samples),which(basal.samples))]
+# compute full geneset arrays
+moffitt.myc2.expr <- moffit.expr.ordered[rownames(moffit.expr.ordered) %in% myc_targets_v2,]
+moffitt.ifna.expr <- moffit.expr.ordered[rownames(moffit.expr.ordered) %in% hallmark_ifn_alpha,]
+moffitt.ifng.expr <- moffit.expr.ordered[rownames(moffit.expr.ordered) %in% hallmark_ifn_gamma,]
+moffitt.gsea.expr <- rbind(moffitt.myc2.expr,moffitt.ifna.expr, moffitt.ifng.expr)
+# plot
+classificationcols <- c(rep('grey',sum(no.samples)), rep('black',sum(classical.samples)),rep("white",sum(basal.samples)))
+heatmap.2(moffitt.gsea.expr,
+        Rowv=NA,
+        Colv = T,
+        margins = c(5,20),
+        key=T,
+        cexRow = 1,
+        cexCol = 0.8,
+        col=colorRampPalette(c("purple", "white", "green"))(299),
+        breaks= c(seq(-5,-0.3,length=100),seq(-0.29,0.29,length=100),seq(0.3,5,length=100)),
+        scale="row",
+        dendrogram = "none",
+        density.info="none",
+        trace="none",
+        RowSideColors = c(rep('green',nrow(moffitt.myc2.expr)),rep('red',nrow(moffitt.ifna.expr)),rep('blue',nrow(moffitt.ifng.expr))),
+        ColSideColors = classificationcols,
+        symm=F,symkey=F,symbreaks=T)
+
+
+## order samples by stromal activity
+stroma.na <-grepl(pattern = ": 0",moffit.meta[20,2:ncol(moffit.meta)])
+stroma.low <-grepl(pattern = ": 1",moffit.meta[20,2:ncol(moffit.meta)])
+stroma.normal <-grepl(pattern = ": 2",moffit.meta[20,2:ncol(moffit.meta)])
+stroma.activated <-grepl(pattern = ": 3",moffit.meta[20,2:ncol(moffit.meta)])
+moffit.expr.ordered <- moffit.expr[,c(which(stroma.na),which(stroma.low),which(stroma.normal),which(stroma.activated))]
+# compute full geneset arrays
+moffitt.myc2.expr <- moffit.expr.ordered[rownames(moffit.expr.ordered) %in% myc_targets_v2,]
+moffitt.ifna.expr <- moffit.expr.ordered[rownames(moffit.expr.ordered) %in% hallmark_ifn_alpha,]
+moffitt.ifng.expr <- moffit.expr.ordered[rownames(moffit.expr.ordered) %in% hallmark_ifn_gamma,]
+moffitt.gsea.expr <- rbind(moffitt.myc2.expr,moffitt.ifna.expr, moffitt.ifng.expr)
+# plot heatmap
+classificationcols <- c(rep('black',sum(stroma.na)), rep('grey',sum(stroma.low)),rep("white",sum(stroma.normal)), rep("red",sum(stroma.activated)))
+heatmap.2(moffitt.gsea.expr,
+        Rowv=NA,
+        Colv = T,
+        margins = c(5,20),
+        key=T,
+        cexRow = 1,
+        cexCol = 0.8,
+        col=colorRampPalette(c("purple", "white", "green"))(299),
+        breaks= c(seq(-5,-0.3,length=100),seq(-0.29,0.29,length=100),seq(0.3,5,length=100)),
+        scale="row",
+        dendrogram = "none",
+        density.info="none",
+        trace="none",
+        RowSideColors = c(rep('green',nrow(moffitt.myc2.expr)),rep('red',nrow(moffitt.ifna.expr)),rep('blue',nrow(moffitt.ifng.expr))),
+        ColSideColors = classificationcols,
+        symm=F,symkey=F,symbreaks=T)
+```
+## FIG2C: MYC-INF signature in MET SITES
+```{r}
+# LIVER
+liver.filt <- grepl(pattern = "Liver|Pancreas",colnames(moffit.meta)[2:ncol(moffit.meta)])
+moffit.expr.liver <- moffit.expr[,liver.filt]
+moffit.meta.liver <- moffit.meta[,c(TRUE,liver.filt)]
+# run GSVAs on different genesets
+data.input <- moffit.expr.liver
+rownames(data.input) <- gene.list$ENTREZID # change to entrez ids for GSVA
+moffit.gsva.liver <- gsva(expr=data.input, 
+                         gset.idx.list=c1_Hallmark_Sets, 
+                         method="gsva", 
+                         kcdf="Gaussian", 
+                         min.sz=10, 
+                         max.sz=250)
+# setup linear model
+TissueSite <- factor(as.character(moffit.meta.liver[15,2:ncol(moffit.meta.liver)]))
+gr <- TissueSite == "Liver_Metastasis"
+des <- model.matrix(~gr)
+data.fit.liver <- lmFit(moffit.gsva.liver, design = des)
+data.fit.liver <- eBayes(data.fit.liver)
+data.top.liver <- topTable(data.fit.liver, number = Inf, sort.by= "p")
+
+
+# LYMPH
+lymph.filt <- grepl(pattern = "Lymph|Pancreas",colnames(moffit.meta)[2:ncol(moffit.meta)])
+moffit.expr.lymph <- moffit.expr[,lymph.filt]
+moffit.meta.lymph <- moffit.meta[,c(TRUE,lymph.filt)]
+# run GSVAs on different genesets
+data.input <- moffit.expr.lymph
+rownames(data.input) <- gene.list$ENTREZID # change to entrez ids for GSVA
+moffit.gsva.lymph <- gsva(expr=data.input, 
+                         gset.idx.list=c1_Hallmark_Sets, 
+                         method="gsva", 
+                         kcdf="Gaussian", 
+                         min.sz=10, 
+                         max.sz=250)
+# setup linear model
+TissueSite <- factor(as.character(moffit.meta.lymph[15,2:ncol(moffit.meta.lymph)]))
+gr <- TissueSite == "LymphNode_Metastasis"
+des <- model.matrix(~gr)
+data.fit.LN <- lmFit(moffit.gsva.lymph, design = des)
+data.fit.LN <- eBayes(data.fit.LN)
+data.top.LN <- topTable(data.fit.LN, number = Inf, sort.by= "p")
+
+# LUNG
+lung.filt <- grepl(pattern="Lung|Primary",colnames(moffit.meta)[2:ncol(moffit.meta)])
+moffit.expr.lung <- moffit.expr[,lung.filt]
+moffit.meta.lung <- moffit.meta[,c(TRUE,lung.filt)]
+# run GSVAs on different genesets
+data.input <- moffit.expr.lung
+rownames(data.input) <- gene.list$ENTREZID # change to entrez ids for GSVA
+moffit.gsva.lung <- gsva(expr=data.input, 
+                         gset.idx.list=c1_Hallmark_Sets, 
+                         method="gsva", 
+                         kcdf="Gaussian", 
+                         min.sz=10, 
+                         max.sz=250)
+# setup linear model
+TissueSite <- factor(as.character(moffit.meta.lung[15,2:ncol(moffit.meta.lung)]))
+gr <- TissueSite == "Lung_Metastasis"
+des <- model.matrix(~gr)
+data.fit.lung <- lmFit(moffit.gsva.lung, design = des)
+data.fit.lung <- eBayes(data.fit.lung)
+data.top.lung <- topTable(data.fit.lung, number = Inf, sort.by= "p")
+
+
+## FIG2C PLOT
+data.top.liver.sig <- rownames(data.top.liver)[data.top.liver$adj.P.Val<0.05 & abs(data.top.liver$logFC) > 0.2]
+data.top.lung.sig <- rownames(data.top.lung)[data.top.lung$adj.P.Val<0.05 & abs(data.top.lung$logFC) > 0.2]
+data.top.LN.sig <- rownames(data.top.LN)[data.top.LN$adj.P.Val<0.05 & abs(data.top.LN$logFC) > 0.2]
+hallmark.sig.list <- unique(c(data.top.liver.sig, data.top.lung.sig, data.top.LN.sig))
+hallmark.sig.logfc <- data.frame(geneset = hallmark.sig.list,
+                                 liver = data.top.liver[hallmark.sig.list,'logFC'],
+                                 lung = data.top.lung[hallmark.sig.list,'logFC'],
+                                 lymphnode = data.top.LN[hallmark.sig.list,'logFC'])
+hallmark.sig.logfc <- hallmark.sig.logfc %>% arrange(desc(liver))
+hallmark.sig.logfc$geneset <- factor(hallmark.sig.logfc$geneset,levels=hallmark.sig.logfc$geneset)
+
+pdf(file="fig2c.pdf")
+hallmark.sig.logfc %>% 
+  pivot_longer(cols = c('liver','lung','lymphnode'), values_to = "logFC") %>%
+  ggplot(aes(x=name,y=geneset)) +
+  geom_point(aes(size=abs(logFC), colour=(logFC>0))) + 
+  scale_y_discrete(name ="", labels=hallmark.sig.logfc$geneset)+
+  theme_classic()
+dev.off()
+```
+

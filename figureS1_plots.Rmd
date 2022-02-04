@@ -1,0 +1,246 @@
+---
+title: "FigS1"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+## Load dependencies
+```{r}
+options(connectionObserver = NULL) # this is added to fix a bug with loading  ‘org.Hs.eg.db’ pkg in Rstudio
+library(dplyr)
+library(GSVA)
+library(GSVAdata)
+library(GSEABase)
+library(gplots)
+library(RColorBrewer)
+library(viper)
+library(dorothea)
+library(EnhancedVolcano)
+library(gridExtra)
+library(ggpubr)
+library(reshape2)
+library(tidyr)
+library(limma)
+library(ggplot2)
+library(ggrepel)
+```
+## FigS1A: Correlating cell line properties with liver metastatic potential
+```{r}
+# read in proliferation matrix
+setwd <- getwd()
+proliferation.all <- read.csv('Figure 3 Source Data inc proliferation rates.csv')
+load('pdac.expr.files.RData')
+
+# add in liver mean potential data
+pdac.prolif <- proliferation.all %>% 
+  filter(depmap_id %in% pdac.pot$depmap_id) %>% 
+  left_join(pdac.pot[,c('depmap_id','liver_meanpotential')]) %>%
+  arrange(desc(liver_meanpotential))
+
+# scatter plot of proliferation rate and liver mean potential
+p1 <- ggplot(pdac.prolif, aes(x=met.potential..all5., y=liver_meanpotential)) + 
+  geom_point(color='grey') + geom_smooth(method=lm, se=F) + stat_cor(label.y = 1) + theme_minimal()
+p2 <- ggplot(pdac.prolif, aes(x=doubling..hrs., y=liver_meanpotential)) + 
+  geom_point(color='grey') +geom_smooth(method=lm, se=F) + stat_cor(label.y = 1) + theme_minimal()
+p3 <- ggplot(pdac.prolif, aes(x=mutRate, y=liver_meanpotential)) + 
+  geom_point(color='grey') + geom_smooth(method=lm, se=F) + stat_cor(label.y = 1) + theme_minimal()
+p4 <- ggplot(pdac.prolif, aes(x=aneuploidy..arm.level.events., y=liver_meanpotential)) + 
+  geom_point(color='grey') + geom_smooth(method=lm, se=F) + stat_cor(label.y = 1) + theme_minimal()
+
+# save file
+pdf("figs1a.pdf")
+grid.arrange(p1,p2,p3,p4,nrow=2)
+dev.off()
+```
+# FIGS1B: BRAIN GSVA
+```{r}
+setwd <- getwd()
+load('pdac.expr.files.RData')
+
+# GSVA requires entrezids of the genes in the expression matrix
+symbol.map <- AnnotationDbi::select(org.Hs.eg.db, keys = rownames(pdac.expr),columns = c("ENTREZID", "SYMBOL"),keytype = "SYMBOL")
+rownames(pdac.expr) <- symbol.map$ENTREZID[!duplicated(symbol.map$SYMBOL)]
+
+# load gene set libraries
+c1_Hallmark_Sets <- getGmt('h.all.v7.2.entrez.gmt')
+
+# generate GSVA matrix
+pdac.gsva.c1 <- gsva(expr=pdac.expr, 
+                         gset.idx.list=c1_Hallmark_Sets, 
+                         method="gsva", 
+                         kcdf="Gaussian", 
+                         min.sz=10, 
+                         max.sz=250)
+
+gr <- pdac.pot$brain_meanpotential > -2
+des <- model.matrix(~gr)
+data.fit.c1 <- lmFit(pdac.gsva.c1, design = des)
+data.fit.c1 <- eBayes(data.fit.c1)
+data.top.c1 <- topTable(data.fit.c1, number = 100, sort.by= "p")
+data.top.c1$ID <- rownames(data.top.c1)
+
+# plot
+pdf("figs1b.pdf")
+data.top.c1 %>% 
+  filter(P.Value < 0.05) %>% 
+  arrange(logFC) %>% 
+  ggplot(aes(x=reorder(ID,logFC), y=logFC, fill = logFC>0)) + 
+  geom_bar(stat = "identity") + 
+  coord_flip() + 
+  theme_minimal()
+dev.off()
+```
+# FIGS1C: Classification of CCLEs
+```{r}
+# load expression data
+setwd <- getwd()
+load('pdac.expr.files.RData')
+
+# load genesets
+moffitt <- read.table(file="moffitt.txt",header = TRUE)
+collisson <- read.table(file="collisson.txt",header = TRUE)
+
+# moffitt
+moffitt.scores <- as.data.frame(pdac.expr) %>% 
+  mutate(gene = rownames(pdac.expr)) %>% 
+  filter(gene %in% moffitt$Gene) %>%
+  left_join(moffitt,by=c("gene"="Gene")) %>%
+  group_by(Classification) %>%
+  summarise_at(colnames(pdac.expr),mean, na.rm = TRUE) %>%
+  as.matrix
+# assign cell lines to Moffitt subtypes
+moffitt.subtypes <- vector(mode="character",length=ncol(pdac.expr))
+for(i in 1:length(moffitt.subtypes)){
+  moffitt.subtypes[i] <- moffitt.scores[which.max(moffitt.scores[,i+1]),1]
+}
+# heatmap with moffit
+moffitt.genes <- moffitt$Gene[moffitt$Gene %in% rownames(pdac.expr)]
+pdac.expr.moffitt <- pdac.expr[moffitt.genes,]
+heatmap.2(pdac.expr.moffitt,
+          Rowv = NA,
+          Colv=NA,
+          cexRow = 0.2,
+          col=colorspace::diverge_hsv(10),
+          scale="col",
+          dendrogram = "none",
+          #density.info="none",
+          trace="none",
+          ColSideColors = sapply(moffitt.subtypes,function(x){case_when((x=="Basal")~"green",(x=="Classical")~'blue')}))
+
+
+# collisson
+collisson.scores <- as.data.frame(pdac.expr) %>% 
+  mutate(gene = rownames(pdac.expr)) %>% 
+  filter(gene %in% collisson$Gene) %>%
+  left_join(collisson,by=c("gene"="Gene")) %>%
+  group_by(Classification) %>%
+  summarise_at(colnames(pdac.expr),mean, na.rm = TRUE) %>%
+  as.matrix
+# assign cell lines to collisson subtypes
+collisson.subtypes <- vector(mode="character",length=ncol(pdac.expr))
+for(i in 1:length(moffitt.subtypes)){
+  collisson.subtypes[i] <- collisson.scores[which.max(collisson.scores[,i+1]),1]
+}
+collisson.genes <- collisson$Gene[collisson$Gene %in% rownames(pdac.expr)]
+pdac.expr.collisson <- pdac.expr[collisson.genes,]
+
+# plot
+pdf("figs1c-1.pdf")
+heatmap.2(pdac.expr.collisson,
+          Rowv = NA,
+          Colv=NA,
+          cexRow = 0.2,
+          col=colorspace::diverge_hsv(10),
+          scale="col",
+          dendrogram = "none",
+          #density.info="none",
+          trace="none",
+          ColSideColors = sapply(collisson.subtypes,function(x){case_when((x=="Quasimesenchymal")~"green",(x=="Classical")~'blue')}))
+
+# piecharts
+pdac.pot$collisson <- collisson.subtypes
+pdac.pot$moffitt <- moffitt.subtypes
+
+pdf("figs1c-2.pdf")
+pdac.pot %>% filter(liver_meanpotential>-2) %>%
+  ggplot(aes(x="",y=moffitt, fill=moffitt))+
+  geom_bar(stat = "identity") +
+  coord_polar("y", start=0)
+dev.off()
+
+pdf("figs1c-3.pdf")
+pdac.pot %>% filter(liver_meanpotential<(-2)) %>%
+  ggplot(aes(x="",y=moffitt, fill=moffitt))+
+  geom_bar(stat = "identity") +
+  coord_polar("y", start=0)
+dev.off()
+
+pdf("figs1c-4.pdf")
+pdac.pot %>% filter(liver_meanpotential>-2) %>%
+  ggplot(aes(x="",y=collisson, fill=collisson))+
+  geom_bar(stat = "identity") +
+  coord_polar("y", start=0)
+dev.off()
+
+pdf("figs1c-5.pdf")
+pdac.pot %>% filter(liver_meanpotential<(-2)) %>%
+  ggplot(aes(x="",y=collisson, fill=collisson))+
+  geom_bar(stat = "identity") +
+  coord_polar("y", start=0)
+dev.off()
+```
+## FIGS1D: TRMT12 map
+```{r}
+
+# load dependency data
+setwd <- getwd()
+load('pdac.dep.files.RData')
+
+# run linear analysis
+gr <- pdac.dep.pot$liver_meanpotential > -2
+des <- model.matrix(~ gr) 
+data.fit <- lmFit(pdac.dep, design = des)
+data.fit <- eBayes(data.fit)
+data.top <- topTable(data.fit, number = Inf, sort.by= "p")
+data.top$ID <- rownames(data.top)
+data.top$rank <- 1:nrow(data.top)
+# Extract TRMT12 data
+trmt.dep <- data.frame(TRMT12 = pdac.dep["TRMT12", ],
+                        pdac.dep.pot[, c('name',
+                                         'liver_meanpotential',
+                                         'brain_meanpotential',
+                                         'lung_meanpotential',
+                                         'kidney_meanpotential',
+                                         'bone_meanpotential'),], stringsAsFactors = F)
+trmt.dep <- reshape2::melt(trmt.dep, measure.vars = 3:7)
+trmt.dep$value <- as.numeric(trmt.dep$value)
+
+# PATU8902's severe dependency is skewing the graph a lot. if we remove it a clearer pattern can be seen.
+# plot dependencies
+pdf(file="figs1d.pdf")
+trmt.dep %>% 
+  filter(name != 'PATU8902') %>%
+  mutate(value_unlog = 10^value) %>%
+  ggplot(mapping = aes(x = TRMT12, y = value_unlog)) + 
+    geom_point(aes(color=name,)) + 
+    stat_smooth(method=lm, se=T) +
+    facet_wrap(~variable) +
+    scale_y_continuous(trans = 'log2') +
+    theme_bw() +  
+    theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank())
+dev.off()
+trmt.dep <- trmt.dep %>% mutate(value_unlog = 10^value)
+trmt.dep.reg <- lm(value_unlog ~ TRMT12, data = trmt.dep[trmt.dep$variable=='liver_meanpotential',])
+summary(trmt.dep.reg)
+```
+
+
+

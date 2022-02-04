@@ -1,0 +1,328 @@
+---
+title: "Fig1"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+## Load dependencies
+```{r}
+options(connectionObserver = NULL) # this is added to fix a bug with loading  ‘org.Hs.eg.db’ pkg in Rstudio
+library(dplyr)
+library(GSVA)
+library(GSVAdata)
+library(GSEABase)
+library(gplots)
+library(RColorBrewer)
+library(viper)
+library(dorothea)
+library(EnhancedVolcano)
+library(gridExtra)
+library(ggpubr)
+library(reshape2)
+library(tidyr)
+library(limma)
+library(ggplot2)
+library(ggrepel)
+```
+
+# FIG1C: GVSA Enrichment analysis
+```{r}
+setwd <- getwd()
+load('pdac.expr.files.RData')
+
+# GSVA requires entrezids of the genes in the expression matrix
+symbol.map <- AnnotationDbi::select(org.Hs.eg.db, keys = rownames(pdac.expr),columns = c("ENTREZID", "SYMBOL"),keytype = "SYMBOL")
+rownames(pdac.expr) <- symbol.map$ENTREZID[!duplicated(symbol.map$SYMBOL)]
+
+# load gene set libraries
+c1_Hallmark_Sets <- getGmt('h.all.v7.2.entrez.gmt')
+
+# generate GSVA matrix
+pdac.gsva.c1 <- gsva(expr=pdac.expr, 
+                         gset.idx.list=c1_Hallmark_Sets, 
+                         method="gsva", 
+                         kcdf="Gaussian", 
+                         min.sz=10, 
+                         max.sz=250)
+
+# fit linear models to each GSVA using liver tropism groupings
+gr <- pdac.pot$liver_meanpotential > -2
+des <- model.matrix(~gr)
+# run linear model for c1  HALLMARK genesets
+data.fit.c1 <- lmFit(pdac.gsva.c1, design = des)
+data.fit.c1 <- eBayes(data.fit.c1)
+data.top.c1 <- topTable(data.fit.c1, number = 100, sort.by= "p")
+data.top.c1$ID <- rownames(data.top.c1)
+
+# FIG1C plot
+data.input <- data.top.c1 %>% filter(adj.P.Val < 0.05) %>% arrange(desc(logFC))
+data.input$name <- rownames(data.input)
+pdf("fig1c.pdf")
+ggplot(data.input,aes(x=reorder(name,logFC), y=logFC, fill = logFC>0)) + 
+  geom_bar(stat = "identity") + 
+  coord_flip() + 
+  theme_minimal()
+dev.off()
+```
+## FIG.1D: GSVA heatmap
+```{r}
+#  calculate scores of key GSVA signatures
+pdac.myc1.collapse <- apply(pdac.expr[rownames(pdac.expr) %in% c1_Hallmark_Sets[["HALLMARK_MYC_TARGETS_V1"]]@geneIds,],2,mean)
+pdac.myc2.collapse <- apply(pdac.expr[rownames(pdac.expr) %in% c1_Hallmark_Sets[["HALLMARK_MYC_TARGETS_V2"]]@geneIds,],2,mean)
+pdac.ifna.collapse <- apply(pdac.expr[rownames(pdac.expr) %in% c1_Hallmark_Sets[["HALLMARK_INTERFERON_ALPHA_RESPONSE"]]@geneIds,],2,mean)
+pdac.ifng.collapse <- apply(pdac.expr[rownames(pdac.expr) %in% c1_Hallmark_Sets[["HALLMARK_INTERFERON_GAMMA_RESPONSE"]]@geneIds,],2,mean)
+pdac.gsea.collapse <- t(matrix(c(pdac.myc1.collapse,pdac.myc2.collapse,pdac.ifna.collapse,pdac.ifng.collapse),ncol=4))
+colnames(pdac.gsea.collapse) = pdac.pot$name
+# prepare potential data
+pdac.pot$all5_meanpotential <- as.numeric(pdac.pot$all5_meanpotential)
+
+# plot FIG1E
+data.input <- rbind(pdac.gsea.collapse,rep(0,33),pdac.pot$liver_meanpotential,pdac.pot$all5_meanpotential)
+pdf("fig1d.pdf")
+heatmap.2(data.input,
+        Rowv=NA,
+        Colv = NA,
+        labRow = c("Myc targets V1",
+                   "Myc targets V2",
+                   "Interferon-alpha response",
+                   "Interferon-gamma response",
+                   "",
+                   "liver metastatic potential",
+                   "total metastatic potential"),
+        margins = c(5,20),
+        key=FALSE,
+        cexRow = 1,
+        lhei = c(2.2,1),
+        lwid = c(1, 10),
+        cexCol = 0.8,
+        col=colorspace::diverge_hsv(10),
+        scale="row",
+        dendrogram = "none",
+        density.info="none",
+        trace="none",
+        ColSideColors = c(rep('green',10), rep('blue',23)))
+dev.off()
+```
+# FIG.1E: VIPER analysis and TF activity
+```{r}
+# load dorothea regulons
+data(dorothea_hs, package = "dorothea")
+
+# VIPER requires SYMBOLS of the genes in the expression matrix
+rownames(pdac.expr) <- symbol.map$SYMBOL[!duplicated(symbol.map$SYMBOL)]
+
+# tf activity estimation
+regulons = dorothea_hs %>% filter(confidence %in% c("A", "B"))
+tf_activities <- run_viper(pdac.expr, regulons, 
+                           options =  list(method = "scale", minsize = 4, 
+                                           eset.filter = FALSE, cores = 1, 
+                                           verbose = FALSE))
+
+# linear analysis of TF activities
+data.fit <- lmFit(tf_activities, design = des)
+data.fit <- eBayes(data.fit)
+# output top results
+data.top <- topTable(data.fit, number = Inf, sort.by= "p")
+data.top$ID <- rownames(data.top)
+data.top$rank <- 1:nrow(data.top)
+
+# plot volcano (FIG1E)
+pdf("fig1e.pdf")
+EnhancedVolcano(data.top,
+    lab = rownames(data.top),
+    x = 'logFC',
+    y = 'P.Value',
+    pCutoff=0.01,
+    selectLab = c('STAT1','STAT2','MYC','TP53','E2F1','E2F4'),
+    boxedLabels = TRUE,
+    drawConnectors = TRUE,
+    labSize = 4.0)
+dev.off()
+
+# MYC STAT1 correlation (FIGS1)
+data.input <- t(tf_activities[rownames(tf_activities) %in% c("MYC","STAT1","STAT2","FOXM1"),])
+ggplot(as.data.frame(data.input),aes(x=MYC,y=STAT1)) + 
+    geom_point(aes(size=pdac.pot$liver_meanpotential)) + 
+    stat_smooth(method=lm, se=T) +
+      labs(size = "Liver potential")+
+    theme_minimal() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "grey"))
+# stats
+myc.stat1.corr <- lm(MYC ~ STAT1, data = as.data.frame(data.input))
+summary(myc.stat1.corr)
+```
+## FIG.1F: CORRELATION OF LIVER MET POTENTIAL AND MYC-INF SCORE
+```{r}
+# calculate combined Myc(high)Inf(low) score
+myc.inf.score <- apply(pdac.gsea.collapse,2,function(x){prod(x[1:2]) - prod(x[3:4])})
+
+# plot correlation
+data.input <- as.data.frame(t(rbind(myc.inf.score, pdac.pot$liver_meanpotential)))
+pdf("fig1f.pdf")
+ggplot(data.input, aes(x=myc.inf.score,y=V2)) + 
+  geom_point(size=5) + 
+  stat_smooth(method=lm, se=T) +
+  labs(x = "Myc-Inf score", y="Liver metastatic potential") +
+  theme_minimal()
+dev.off()
+
+# stats
+myc.inf.corr <- lm(V2 ~ myc.inf.score, data = data.input)
+summary(myc.inf.corr)
+```
+## FIGS1G: SNP mutations
+```{r}
+# load snp data
+mutations.panc <- read.csv(file='~/R/MetMap/CCLE_files/CCLE_mutations_pdac_clean.csv', header=FALSE)
+gene.names <- mutations.panc$V1[2:length(mutations.panc$V1)]
+mutations.panc <- mutations.panc[,-c(1)]
+colnames(mutations.panc) <- mutations.panc[1,]
+mutations.panc <- mutations.panc[-c(1),]
+# change to numeric
+mutations.panc <- as.data.frame(apply(mutations.panc,2,as.numeric))
+rownames(mutations.panc) <- gene.names
+
+# order rows by most common mutations
+snp.sums <- rowSums(mutations.panc)
+snp.rank <- order(snp.sums,decreasing = T)
+mutations.panc <- mutations.panc[snp.rank,]
+# order columns by liver metastatic potential
+mutations.panc <- mutations.panc[,pdac.pot$depmap_id]
+
+# run linear analysis
+data.fit <- lmFit(mutations.panc, design=des)
+data.fit <- eBayes(data.fit)
+data.top <- topTable(data.fit, number = Inf,sort.by= "p")
+data.top$ID <- rownames(data.top)
+data.top$rank <- 1:nrow(data.top)
+
+# plot data (FIG1G)
+pdf("fig1g-1.pdf", width=7,height=5)
+ggplot(data.top, aes(x=rank, y=-log10(P.Value), color=(logFC>0))) + 
+  geom_point(show.legend = T) + 
+  geom_text_repel(data=data.top[c('SMAD4','TP53','KRAS','CDKN2A','CDKN2B','ARID1A','TGFBR2','ACVR1B','MAP2K4','CCL5','OR10K1','RNF43','OR6Q1','FAM86A','MEF2C','TOR1AIP1','HIST1H2BB','MYC','SCRIB','MUC16'), ], mapping=aes(x=rank, y=-log10(P.Value), label=ID), size=4, box.padding = 0.3, force = 0.5,segment.size = 0.1, min.segment.length = 0.05, show.legend = F, color = "black") + 
+  scale_color_manual(values=c("#377EB8","#E41A1C")) + 
+  theme_classic2()
+dev.off()
+```
+## FIGS1G: Copy number
+```{r}
+# load copy number data
+load('pdac.cn.files.RData')
+data.input <- pdac.cn
+data.input <- pdac.cn[rowSums(abs(pdac.cn)) >= 1,]
+
+# run linear analysis
+data.fit <- lmFit(data.input, design=des)
+data.fit <- eBayes(data.fit)
+data.top <- topTable(data.fit, number = Inf, sort.by= "p")
+data.top$ID <- rownames(data.top)
+data.top$rank <- 1:nrow(data.top)
+data.top$Cytoband <- symbol.entrez.chr$CYTOBAND[match(data.top$ID,symbol.entrez.chr$SYMBOL)]
+
+# plot data (FIG1G)
+pdf(file="fig1g-2.pdf")
+ggplot(data.top, aes(x=rank, y=-log10(P.Value), color=(logFC>0))) + 
+  geom_point(show.legend = F) + 
+  geom_text_repel(data=data.top[c('MYC','KRAS',"TP53","ITPR2","MUC16","CDKN2A"),], mapping=aes(x=rank, y=-log10(P.Value), label=ID), size=4, box.padding = 0.3, force = 0.5,segment.size = 0.1, min.segment.length = 0.05, show.legend = F, color = "black") + 
+  scale_color_manual(values=c("#377EB8","#E41A1C")) + 
+  theme_classic2()
+dev.off()
+```
+## FIGS1G: Cytoband CNVs
+```{r}
+
+# make cytoband matrix
+pdac.cytoband.cn <- pdac.cn 
+cytoband.list <- symbol.entrez.chr$CYTOBAND[match(rownames(pdac.cn),symbol.entrez.chr$SYMBOL)]
+pdac.cytoband.cn$cytoband <- cytoband.list
+pdac.cytoband.cn <- pdac.cytoband.cn %>% 
+  group_by(cytoband) %>%
+  summarise(across(everything(), sum))
+
+# clean matrix
+pdac.cytoband.cn <- pdac.cytoband.cn[!is.na(pdac.cytoband.cn$cytoband),]
+cytoband.list <- pdac.cytoband.cn$cytoband
+pdac.cytoband.cn <- pdac.cytoband.cn %>% dplyr::select(-cytoband)
+rownames(pdac.cytoband.cn) <- cytoband.list
+pdac.cytoband.cn.rows <- rownames(pdac.cytoband.cn)[rowSums(abs(pdac.cytoband.cn)) >= 1]
+pdac.cytoband.cn <- pdac.cytoband.cn[rowSums(abs(pdac.cytoband.cn)) >= 1,]
+rownames(pdac.cytoband.cn) <- pdac.cytoband.cn.rows
+
+# run linear analysis
+data.fit <- lmFit(pdac.cytoband.cn, design=des)
+data.fit <- eBayes(data.fit)
+data.top <- topTable(data.fit, number = Inf, sort.by= "p")
+data.top$ID <- rownames(data.top)
+data.top$rank <- 1:nrow(data.top)
+
+# generate plot
+pdf(file="fig1g-3.pdf")
+ggplot(data.top, aes(x=rank, y=-log10(P.Value), color=(logFC>0))) + 
+  geom_point(show.legend = F) + 
+  geom_text_repel(data=data.top[c(1:5,985),], mapping=aes(x=rank, y=-log10(P.Value), label=ID), size=4, box.padding = 0.3, force = 0.5,segment.size = 0.1, min.segment.length = 0.05, show.legend = F, color = "black") + 
+  scale_color_manual(values=c("#377EB8","#E41A1C")) + 
+  theme_classic2()
+dev.off()
+```
+# FIGS1H: CRSIPR DEPENDENCY 
+```{r}
+# load dependency data
+setwd <- getwd()
+load('pdac.dep.files.RData')
+
+# run linear analysis
+gr <- pdac.dep.pot$liver_meanpotential > -2
+des <- model.matrix(~ gr) 
+data.fit <- lmFit(pdac.dep, design = des)
+data.fit <- eBayes(data.fit)
+data.top <- topTable(data.fit, number = Inf, sort.by= "p")
+data.top$ID <- rownames(data.top)
+data.top$rank <- 1:nrow(data.top)
+
+# generate plot
+pdf(file="fig1h-1.pdf")
+ggplot(data.top, aes(x=rank, y=-log10(P.Value), color=(logFC>0))) + 
+  geom_point(show.legend = F) + 
+  geom_text_repel(data=data.top[c(1:2),], mapping=aes(x=rank, y=-log10(P.Value), label=ID), size=4, box.padding = 0.3, force = 0.5,segment.size = 0.1, min.segment.length = 0.05, show.legend = F, color = "black") + 
+  scale_color_manual(values=c("#377EB8","#E41A1C")) + 
+  theme_classic2()
+dev.off()
+
+# Extract TRMT12 data
+trmt.dep <- data.frame(TRMT12 = pdac.dep["TRMT12", ],
+                        pdac.dep.pot[, c('name',
+                                         'liver_meanpotential',
+                                         'brain_meanpotential',
+                                         'lung_meanpotential',
+                                         'kidney_meanpotential',
+                                         'bone_meanpotential'),], stringsAsFactors = F)
+trmt.dep <- reshape2::melt(trmt.dep, measure.vars = 3:7)
+trmt.dep$value <- as.numeric(trmt.dep$value)
+
+# PATU8902's severe dependency is skewing the graph a lot. if we remove it a clearer pattern can be seen.
+# plot dependencies
+pdf(file="fig1h-2.pdf")
+trmt.dep %>% 
+  filter(name != 'PATU8902') %>%
+  mutate(value_unlog = 10^value) %>%
+  ggplot(mapping = aes(x = TRMT12, y = value_unlog)) + 
+    geom_point(aes(color=name,)) + 
+    stat_smooth(method=lm, se=T) +
+    facet_wrap(~variable) +
+    scale_y_continuous(trans = 'log2') +
+    theme_bw() +  
+    theme(axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank())
+dev.off()
+trmt.dep <- trmt.dep %>% mutate(value_unlog = 10^value)
+trmt.dep.reg <- lm(value_unlog ~ TRMT12, data = trmt.dep[trmt.dep$variable=='liver_meanpotential',])
+summary(trmt.dep.reg)
+```

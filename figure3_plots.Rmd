@@ -1,0 +1,261 @@
+---
+title: "Fig3"
+output: html_notebook
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+# ANALYSIS OF LIN ET AL 2020 DATASET
+Input data is GSE154778_dgeMtx.csv read counts matrix taken from https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE154778
+```{r}
+# load dependencies
+library(Seurat)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(dorothea)
+library(viper)
+library(tibble)
+library(pheatmap)
+library(RColorBrewer)
+library(gridExtra)
+library(ggpubr)
+library(fgsea)
+library(msigdbr)
+library(gplots)
+library(limma)
+library(EnhancedVolcano)
+library(GSVA)
+library(GSEABase)
+library(gridExtra)
+```
+
+# Load data
+```{r}
+# load data
+lin.series.raw <- read.csv('GSE154778_dgeMtx.csv')
+
+# move genes to row
+rownames(lin.series.raw) <- lin.series.raw$X
+lin.series.raw <- lin.series.raw[,-c(1)]
+
+# save metadata
+lin.cell.ids <- colnames(lin.series.raw)
+lin.site.ids <- unlist(lapply(lin.cell.ids,function(x){substr(x,1,unlist(gregexpr('\\.',x))-1)}))
+lin.tissue.site <- unlist(lapply(lin.site.ids,function(x){ifelse(grepl("MET",x),"Metastasis","Primary")}))
+```
+# Pre-processing 
+```{r}
+# create seurat object
+lin.seurat <- CreateSeuratObject(counts = lin.series.raw,
+                                 project = "lin2020",
+                                 min.cells = 3,
+                                 min.features = 200)
+# remove large raw file
+rm(lin.series.raw) 
+
+# add %mito feature
+lin.seurat[["percent.mt"]] <- PercentageFeatureSet(lin.seurat, pattern = "^MT-")
+
+# add metadata
+seurat.site.ids <- unlist(lapply(colnames(lin.seurat),function(x){substr(x,1,unlist(gregexpr('\\.',x))-1)}))
+seurat.tissue.ids <- unlist(lapply(seurat.site.ids,function(x){ifelse(grepl("MET",x),"Metastasis","Primary")}))
+lin.seurat[["sample.id"]] <- seurat.site.ids
+lin.seurat[["tissue.site"]] <- seurat.tissue.ids
+rm(list=c('seurat.site.ids','seurat.tissue.ids'))
+
+# Subset
+lin.seurat <- subset(lin.seurat, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent.mt < 1.5)
+
+# Normalise
+lin.seurat <- NormalizeData(lin.seurat)
+```
+# FIGS2A: Identify ETCs based on top list
+```{r}
+# load etc genes. Gene list taken from Additinal File 2 in Lin et al. 2020: top 20 signature genes for each cell type identified from scRNA-seq
+load('etc_genes.RData')
+
+## extract met etcs
+lin.seurat.etcs <- subset(lin.seurat, subset = sample.id!="MET03")
+# calculate score of average expression of ETC genes 
+lin.seurat.etcs <- AddModuleScore(lin.seurat.etcs, features = list(etc.genelist),name = "ETC.Score",ctrl=50)
+
+# visualise etcsig -PLOT FIGS3A
+pdf(file="figs2a.pdf", width = 20, height = 6)
+ggplot(lin.seurat.etcs[["ETC.Score1"]],aes(x=ETC.Score1))+
+  geom_histogram()+
+  geom_vline(xintercept = -0.25,colour = "red",size = 2)
+dev.off()
+
+# use 0.3 < x as a good cutoff for identifying ETC cells
+etc.filter <- lin.seurat.etcs[["ETC.Score1"]] > -0.3
+table(etc.filter)
+lin.seurat.etcs <-  lin.seurat.etcs[,etc.filter]
+
+# print summary of classification
+etc.counts <- table(lin.seurat.etcs@meta.data$tissue.site)
+total.counts <- table(lin.seurat@meta.data$tissue.site)
+
+print(paste("Proportion of cells defined as ETCs: ",sum(etc.filter)/length(etc.filter)))
+print(paste(etc.counts[1],"ETCs identified from", total.counts[1],"total metastasis cells"))
+print(paste(etc.counts[2],"ETCs identified from", total.counts[2],"total primary tumor cells"))
+
+rm(etc.scores) # remove var to save space
+rm(lin.seurat) # remove var to save space
+
+# REMOVE MET04
+lin.seurat.etcs <- subset(lin.seurat.etcs,subset=sample.id!="MET04")
+```
+# FIG3B/S2B: CLUSTERING ETCs
+```{r}
+# FIND VARIABLES FEATURES
+lin.seurat.etcs <- FindVariableFeatures(lin.seurat.etcs, selection.method = "vst", nfeatures = 2000)
+
+# SCALE DATA 
+lin.seurat.etcs <- ScaleData(lin.seurat.etcs, features = rownames(lin.seurat.etcs))
+
+# RUN PCA
+lin.seurat.etcs <- RunPCA(lin.seurat.etcs, features = VariableFeatures(object = lin.seurat.etcs))
+print(lin.seurat.etcs[["pca"]],dims=1:5,nfeatures=5)
+DimHeatmap(lin.seurat.etcs, dims = 1:10, cells = 500, balanced = TRUE)
+
+# RUN CLUSTERING
+lin.seurat.etcs <- FindNeighbors(lin.seurat.etcs, dims = 1:10, verbose = FALSE)
+lin.seurat.etcs <- FindClusters(lin.seurat.etcs, resolution = 0.4, verbose = FALSE)
+
+# tSNE PLOTS
+lin.seurat.etcs <- RunTSNE(object = lin.seurat.etcs, dims.use = 1:10, do.fast = TRUE)
+plt1 <- DimPlot(object = lin.seurat.etcs, reduction = "tsne",  label = T)
+plt2 <- DimPlot(object = lin.seurat.etcs, reduction = "tsne", group.by = "tissue.site")
+plt3 <- DimPlot(object = lin.seurat.etcs, reduction = "tsne", group.by = "sample.id",  label = T)
+plt1+plt2+plt3
+
+pdf(file="fig3b.pdf", width = 20, height = 6)
+plt1+plt2+plt3
+dev.off()
+```
+## FIG3C: GSVA analysis
+```{r}
+load(file='lin.etc.met.gsea.RData')
+
+# visualise results with heatmap
+data.input <- met01.fgseaRes[,c(1,6)] %>% 
+  left_join(met02.fgseaRes[,c(1,6)],by="pathway") %>%
+  left_join(met05.fgseaRes[,c(1,6)],by="pathway") %>%
+  left_join(met06.fgseaRes[,c(1,6)],by="pathway") %>%
+  rename("NES.x"="met01","NES.y"="met02","NES.x.x"="met05","NES.y.y"="met06") %>%
+  as.data.frame()
+
+pdf(file="fig3c.pdf", width = 10, height = 10)
+data.input %>% 
+  pivot_longer(cols = c('met01','met02','met05','met06'), values_to = "logFC") %>%
+  ggplot(aes(x=name,y=pathway)) +
+  geom_point(aes(size=abs(logFC), colour=(logFC>0))) + 
+  scale_y_discrete(name ="", labels=data.input$pathway)+
+  theme_classic()
+dev.off()
+```
+## FIG3D: expression of key protein groups
+```{r}
+
+# PLOT 3D
+genes.sub <- c("HLA-DRA","HLA-DRB5","IRF3","S100A6","RPL34","RPS2")
+pdf(file="fig3d.pdf", width = 20, height = 6)
+FeaturePlot(lin.seurat.etcs, 
+            reduction = "tsne", 
+            features=genes.sub,
+            col=brewer.pal(9,"YlOrRd"),
+            ncol=2)
+dev.off()
+
+#  IRF9 comples
+pdf(file="figs2c.pdf", width = 20, height = 6)
+FeaturePlot(lin.seurat.etcs, 
+            reduction = "tsne", 
+            features=c("STAT1","STAT2","IRF1","IRF6"),
+            col=brewer.pal(9,"YlOrRd"),
+            ncol=3)
+dev.off()
+
+#  Myc targets v1
+pdf(file="figs2d.pdf", width = 20, height = 6)
+FeaturePlot(lin.seurat.etcs, 
+            reduction = "tsne", 
+            features=c("RPL34","RPS2","RPS3","RPS6"),
+            col=brewer.pal(9,"YlOrRd"),
+            ncol=2)
+dev.off()
+
+pdf(file="figs2e.pdf", width = 20, height = 6)
+#  cytokines
+FeaturePlot(lin.seurat.etcs, 
+            reduction = "tsne", 
+            features=c("CXCL1",  "CXCL2" , "CXCL3" , "CXCL5"),
+            col=brewer.pal(9,"YlOrRd"),
+            ncol=2)
+dev.off()
+```
+# FIG3F: DOROTHEA TF-ACTIVITY ESTIMATIONS
+```{r}
+
+# load regulons
+data(dorothea_hs, package = "dorothea")
+regulons = dorothea_hs %>% filter(confidence %in% c("A", "B"))
+
+# compute VIPER scores
+etcs.viper <- subset(lin.seurat.etcs, features = unique(regulons$target))
+etcs.viper <- run_viper(etcs.viper, regulons,
+                             options = list(method = "scale", minsize = 4, 
+                                       eset.filter = FALSE, cores = 1, 
+                                       verbose = FALSE))
+# extract MYC and STAT1 activities
+data.input <- data.frame(cell.id = colnames(etcs.viper), 
+                         tissue.site = lin.seurat.etcs@meta.data[["tissue.site"]],
+                         sample.id = lin.seurat.etcs@meta.data$sample.id,
+                         myc = as.numeric(etcs.viper["MYC"]@assays$dorothea@data),
+                         stat1 = as.numeric(etcs.viper["STAT1"]@assays$dorothea@data),
+                         stat2 = as.numeric(etcs.viper["STAT2"]@assays$dorothea@data))
+
+pdf(file="fig3f-1.pdf")
+ggplot(data.input, aes(x=myc,y=stat1))+
+  geom_point(aes(colour=sample.id))+
+  stat_smooth(method=lm, se=F) + 
+  stat_cor(label.y = 5) +
+  facet_wrap('tissue.site')
+dev.off()
+
+pdf(file="fig3f-2.pdf")
+ggplot(data.input, aes(x=stat1,y=stat2))+
+  geom_point(aes(colour=sample.id))+
+  stat_smooth(method=lm, se=F) + 
+  stat_cor(label.y = 5) +
+  facet_wrap('tissue.site')
+dev.off()
+```
+## FIG3E: comparing TF activity across mets vs primary
+```{r}
+# ALL METS
+des <- model.matrix(~etcs.viper@meta.data$tissue.site)
+des[,2] <- des[,2]==0
+data.fit <- lmFit(etcs.viper@assays$dorothea@data, design = des)
+data.fit <- eBayes(data.fit)
+# output top results
+data.top <- topTable(data.fit, number = Inf, sort.by= "p")
+data.top$ID <- rownames(data.top)
+data.top$rank <- 1:nrow(data.top)
+#plot
+pdf(file="fig3e.pdf")
+EnhancedVolcano(data.top,
+    lab = rownames(data.top),
+    x = 'logFC',
+    y = 'P.Value',
+    pCutoff=0.001,
+    FCcutoff=0.58,
+    selectLab = c('STAT1','STAT2','MYC','E2F4','RFXAP'),
+    drawConnectors = TRUE,
+    labSize = 4.0,
+    pointSize = 8.0)
+dev.off()
+```
